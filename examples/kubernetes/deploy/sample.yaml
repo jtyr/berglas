@@ -1,4 +1,5 @@
 ---
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -10,6 +11,9 @@ spec:
       app: envserver
   template:
     metadata:
+      annotations:
+        # Enable to use Berglas with Kubernetes secrets.
+        berglas-secrets-enabled: "yes"
       labels:
         app: envserver
     spec:
@@ -23,12 +27,30 @@ spec:
         # This is an example using Berglas with Secret Manager storage.
         - name: API_KEY
           value: sm://PROJECT_ID/my-secret
-
         # This is an example using Berglas with Cloud Storage storage.
         - name: API_KEY
           value: berglas://BUCKET_ID/my-secret
+        volumeMounts:
+        # This is an example using Berglas with Secret Manager storage via Kubernetes secret.
+        - name: foo
+          mountPath: /tmp/foo
+          readOnly: true
+      volumes:
+      - name: foo
+        secret:
+          secretName: test
 
 ---
+
+apiVersion: v1
+stringData:
+  test.txt: sm://PROJECT_ID/my-secret
+kind: Secret
+metadata:
+  name: test
+
+---
+
 apiVersion: v1
 kind: Service
 metadata:

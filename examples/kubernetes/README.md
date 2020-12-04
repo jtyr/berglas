@@ -146,7 +146,7 @@ cluster. For example:
 1. Update `deploy/sample.yaml` to refer to your secret. If you're using Secret
    Manager storage, use the `sm://` prefix. If you're using the Cloud Storage
    storage, use the `berglas://` prefix. See more in the Berglas [reference
-   syntax][reference-syntax].
+   syntax](../../doc/reference-syntax.md).
 
 1. Deploy it:
 
