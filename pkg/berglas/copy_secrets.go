@@ -55,25 +55,53 @@ func (c *Client) CopySecrets(ctx context.Context, envVarContent string) error {
 	dirsToWatch := make(map[string][]string)
 
 	for _, p := range strings.Split(envVarContent, ",") {
-		elems := strings.Split(p, "//")
+		if strings.HasPrefix(p, ">") {
+			subPath := p[1:]
 
-		if len(elems) == 1 {
-			if err := c.processDirectory(elems[0], ctx); err != nil {
-				return errors.Wrapf(err, "failed to process directory %s", elems[0])
+			if err := c.processSubPath(subPath, ctx); err != nil {
+				return errors.Wrapf(err, "failed to process subPath %s", subPath)
 			}
 
-			dirsToWatch[elems[0]] = nil
-		} else if len(elems) == 2 {
+			// TODO: Add watcher (for updates?)
+		} else if strings.Contains(p, "//") {
+			elems := strings.Split(p, "//")
+
 			if err := c.processFile(elems[0], elems[1], ctx); err != nil {
 				return errors.Wrapf(err, "failed to process file %s/%s", elems[0], elems[1])
 			}
 
 			dirsToWatch[elems[0]] = append(dirsToWatch[elems[0]], elems[1])
+		} else {
+			if err := c.processDirectory(p, ctx); err != nil {
+				return errors.Wrapf(err, "failed to process directory %s", p)
+			}
+
+			dirsToWatch[p] = nil
 		}
 	}
 
 	for dir, files := range dirsToWatch {
 		go c.addWatcher(dir, files, ctx)
+	}
+
+	return nil
+}
+
+func (c *Client) processSubPath(destDir string, ctx context.Context) error {
+	srcDir := fmt.Sprintf("%s/%s", destDir, SecretsMountPathPostfix)
+
+	files, err := ioutil.ReadDir(srcDir)
+	if err != nil {
+		return errors.Wrapf(err, "failed to read subPath directory %s", srcDir)
+	}
+
+	for _, f := range files {
+		srcFilePath := fmt.Sprintf("%s/%s", srcDir, f.Name())
+		fullDestFilePath := fmt.Sprintf("%s/%s", destDir, f.Name())
+
+		if err := c.treatFile(srcFilePath, fullDestFilePath, ctx); err != nil {
+			return errors.Wrapf(err, "failed to treat subPath file %s", fullDestFilePath)
+		}
 	}
 
 	return nil

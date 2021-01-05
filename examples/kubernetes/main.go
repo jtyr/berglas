@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,16 +27,21 @@ const (
 	// indicates whether the debug mesages should be shown or not.
 	showDebugMsgsAnnotKey = "berglas-show-debug-messages"
 
-	// disabledAnnotKey is the name of a Pod Annotations key which
+	// berglasEnabledAnnotKey is the name of a Pod Annotations key which
 	// explicitly disables Berglas for that Pod.
 	berglasEnabledAnnotKey = "berglas-enabled"
 
-	// containersSelectedAnnotKey is the name of a Pod Annotation key which
+	// berglasSleepAnnotKey is the name of a Pod Annotations key which
+	// specifies how many seconds should berglas sleep before it executes
+	// the original Pod command.
+	berglasSleepAnnotKey = "berglas-sleep"
+
+	// icontainersSelectedAnnotKey is the name of a Pod Annotation key which
 	// specifies which init containers should only be selected for
 	// processing.
 	icontainersSelectedAnnotKey = "berglas-init-containers-selected"
 
-	// containersIgnoredAnnotKey is the name of a Pod Annotation key which
+	// icontainersIgnoredAnnotKey is the name of a Pod Annotation key which
 	// specifies which init containers should be excluded from processing.
 	icontainersIgnoredAnnotKey = "berglas-init-containers-ignored"
 
@@ -104,7 +110,7 @@ const (
 	// berglasContainer is the default berglas container from which to pull the
 	// berglas binary.
 	// TODO: berglasContainer = "us-docker.pkg.dev/berglas/berglas/berglas:latest"
-	berglasContainer = "jtyr/berglas:v1.5.0"
+	berglasContainer = "jtyr/berglas:v1.6.6"
 
 	// binVolumeName is the name of the volume where the berglas binary is stored.
 	binVolumeName = "berglas-bin"
@@ -138,6 +144,10 @@ var (
 	// berglasEnabled indicates whether the mutator should do anything by
 	// default.
 	berglasEnabled = true
+
+	// berglasSleep indicates default number of seconds which Berglas should sleep
+	// for before executing the original Pod command.
+	berglasSleep int64 = 0
 
 	// queryRegistry indicates whether to try to get command from remote
 	// registry by default if not defined in the Pod.
@@ -192,6 +202,7 @@ var binVolumeMount = corev1.VolumeMount{
 type Config struct {
 	showDebugMsgs          bool
 	berglasEnabled         bool
+	berglasSleep           int64
 	icontainersSelected    []string
 	icontainersIgnored     []string
 	containersSelected     []string
@@ -389,17 +400,32 @@ func (m *BerglasMutator) mutateContainer(_ context.Context, c *corev1.Container,
 					m.logger.Debugf("ignoring SA secret: %s", vm.Name)
 				} else {
 					mountPath := filepath.Clean(vm.MountPath)
-					newMountPath := fmt.Sprintf("%s/%s", mountPath, secretMountPathPostfix)
+					newMountPath := ""
+
+					// TODO: Test volume secret with items AND volume mount with subPath!
+					if len(vm.SubPath) > 0 || len(vm.SubPathExpr) > 0 {
+						// If SubPath is defined, the special symlinked directory is missing which needs special treatment.
+						dirName := path.Dir(mountPath)
+						baseName := path.Base(mountPath)
+						newMountPath = fmt.Sprintf("%s/%s/%s", dirName, secretMountPathPostfix, baseName)
+						ms = append(ms, fmt.Sprintf(">%s", dirName))
+					} else {
+						newMountPath = fmt.Sprintf("%s/%s", mountPath, secretMountPathPostfix)
+
+						// Expecting multiple secrets to be in the volume
+						if len(vs[vm.Name]) > 0 {
+							// Individual secret items
+							for _, p := range vs[vm.Name] {
+								ms = append(ms, fmt.Sprintf("%s//%s", mountPath, filepath.Clean(p)))
+							}
+						} else {
+							ms = append(ms, vm.MountPath)
+						}
+					}
+
 					m.logger.Debugf("mutating volumeMount[name=%s] to be %s", vm.Name, newMountPath)
 					c.VolumeMounts[i].MountPath = newMountPath
 
-					if len(vs[vm.Name]) > 0 {
-						for _, p := range vs[vm.Name] {
-							ms = append(ms, fmt.Sprintf("%s//%s", mountPath, filepath.Clean(p)))
-						}
-					} else {
-						ms = append(ms, vm.MountPath)
-					}
 				}
 			}
 		}
@@ -415,10 +441,17 @@ func (m *BerglasMutator) mutateContainer(_ context.Context, c *corev1.Container,
 	// Add the shared volume mount
 	c.VolumeMounts = append(c.VolumeMounts, binVolumeMount)
 
-	// Prepend the command with berglas exec --
+	// Prepend the command with berglas exec
 	original := append(command, c.Args...)
 	c.Command = []string{binVolumeMountPath + "berglas"}
-	c.Args = append([]string{"exec", "--"}, original...)
+	cmdArgs := []string{"exec"}
+
+	if m.config.berglasSleep > 0 {
+		m.logger.Debugf("setting sleep for %d seconds", m.config.berglasSleep)
+		cmdArgs = append(cmdArgs, fmt.Sprintf("--sleep=%d", m.config.berglasSleep))
+	}
+
+	c.Args = append(append(cmdArgs, "--"), original...)
 
 	if len(ms) > 0 {
 		evPaths := corev1.EnvVar{
@@ -478,24 +511,25 @@ func (m *BerglasMutator) mutateContainer(_ context.Context, c *corev1.Container,
 // Set config options based on default values or values from Annotations.
 func (m *BerglasMutator) setConfig(annot map[string]string) {
 	// Global
-	m.config.showDebugMsgs = *getBoolAnnot(annot, showDebugMsgsAnnotKey, &showDebugMsgs)
-	m.config.berglasEnabled = *getBoolAnnot(annot, berglasEnabledAnnotKey, &berglasEnabled)
+	m.config.showDebugMsgs = *getBoolAnnotP(annot, showDebugMsgsAnnotKey, &showDebugMsgs)
+	m.config.berglasEnabled = *getBoolAnnotP(annot, berglasEnabledAnnotKey, &berglasEnabled)
 	m.config.icontainersSelected = getStringArrayAnnot(annot, icontainersSelectedAnnotKey)
 	m.config.icontainersIgnored = getStringArrayAnnot(annot, icontainersIgnoredAnnotKey)
 	m.config.containersSelected = getStringArrayAnnot(annot, containersSelectedAnnotKey)
 	m.config.containersIgnored = getStringArrayAnnot(annot, containersIgnoredAnnotKey)
-	m.config.queryRegistry = *getBoolAnnot(annot, queryRegistryAnnotKey, &queryRegistry)
-	m.config.secretsEnabled = *getBoolAnnot(annot, secretsEnabledAnnotKey, &secretsEnabled)
+	m.config.queryRegistry = *getBoolAnnotP(annot, queryRegistryAnnotKey, &queryRegistry)
+	m.config.secretsEnabled = *getBoolAnnotP(annot, secretsEnabledAnnotKey, &secretsEnabled)
 	// TODO: Per container (val@container1,val@container2)?
-	m.config.secretsIgnoreSa = *getBoolAnnot(annot, secretsIgnoreSaAnnotKey, &secretsIgnoreSa)
+	m.config.berglasSleep = getInt64Annot(annot, berglasSleepAnnotKey, berglasSleep)
+	m.config.secretsIgnoreSa = *getBoolAnnotP(annot, secretsIgnoreSaAnnotKey, &secretsIgnoreSa)
 	m.config.volumesSelected = getStringArrayAnnot(annot, volumesSelectedAnnotKey)
 	m.config.volumesIgnored = getStringArrayAnnot(annot, volumesIgnoredAnnotKey)
 	m.config.secretsExecUser = getStringAnnot(annot, secretsExecUserAnnotKey)
-	m.config.secretsRunAsUser = getInt64Annot(annot, secretsRunAsUserAnnotKey, nil)
-	m.config.secretsRunAsGroup = getInt64Annot(annot, secretsRunAsGroupAnnotKey, nil)
-	m.config.secretsRunAsNonRoot = getBoolAnnot(annot, secretsRunAsNonRootAnnotKey, nil)
-	m.config.secretsAllowPrivEscal = getBoolAnnot(annot, secretsAllowPrivEscalAnnotKey, nil)
-	m.config.secretsRoRootFsEnabled = getBoolAnnot(annot, secretsRoRootFsEnabledAnnotKey, nil)
+	m.config.secretsRunAsUser = getInt64AnnotP(annot, secretsRunAsUserAnnotKey, nil)
+	m.config.secretsRunAsGroup = getInt64AnnotP(annot, secretsRunAsGroupAnnotKey, nil)
+	m.config.secretsRunAsNonRoot = getBoolAnnotP(annot, secretsRunAsNonRootAnnotKey, nil)
+	m.config.secretsAllowPrivEscal = getBoolAnnotP(annot, secretsAllowPrivEscalAnnotKey, nil)
+	m.config.secretsRoRootFsEnabled = getBoolAnnotP(annot, secretsRoRootFsEnabledAnnotKey, nil)
 }
 
 // hasBerglasReferences parses the environment and returns true if any of the
@@ -681,7 +715,7 @@ func (m *BerglasMutator) fetchJson(url string, header http.Header) ([]byte, erro
 }
 
 // Return the annotation's or the default bool value.
-func getBoolAnnot(annot map[string]string, key string, defVal *bool) *bool {
+func getBoolAnnotP(annot map[string]string, key string, defVal *bool) *bool {
 	if val, ok := annot[key]; ok {
 		bVal := false
 
@@ -696,7 +730,19 @@ func getBoolAnnot(annot map[string]string, key string, defVal *bool) *bool {
 }
 
 // Return the annotation's or the default int64 value.
-func getInt64Annot(annot map[string]string, key string, defVal *int64) *int64 {
+func getInt64Annot(annot map[string]string, key string, defVal int64) int64 {
+	if val, ok := annot[key]; ok {
+		if n, err := strconv.Atoi(val); err == nil {
+			iVal := int64(n)
+			return iVal
+		}
+	}
+
+	return defVal
+}
+
+// Return pointer to the annotation's or the default int64 value.
+func getInt64AnnotP(annot map[string]string, key string, defVal *int64) *int64 {
 	if val, ok := annot[key]; ok {
 		if n, err := strconv.Atoi(val); err == nil {
 			iVal := int64(n)

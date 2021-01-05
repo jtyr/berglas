@@ -28,6 +28,7 @@ import (
 	"strings"
 	"syscall"
 	"text/tabwriter"
+	"time"
 
 	"github.com/GoogleCloudPlatform/berglas/pkg/berglas"
 	"github.com/pkg/errors"
@@ -53,6 +54,8 @@ var (
 	logLevel  string
 
 	accessGeneration int64
+
+	sleep int64
 
 	listGenerations bool
 	listPrefix      string
@@ -463,6 +466,8 @@ func main() {
 		"KMS key to use for encryption (only used when secret doesn't exist)")
 
 	rootCmd.AddCommand(execCmd)
+	execCmd.Flags().Int64Var(&sleep, "sleep", 0,
+		"Sleep before running")
 	execCmd.Flags().BoolVar(&execLocal, "local", false, "")
 	if err := execCmd.Flags().MarkDeprecated("local", "there is no replacement"); err != nil {
 		panic(err)
@@ -863,6 +868,11 @@ func execRun(_ *cobra.Command, args []string) error {
 		return misuseError(err)
 	}
 	defer closer()
+
+	if sleep != 0 {
+		fmt.Fprintf(stderr, "sleeping for %d seconds\n", sleep)
+		time.Sleep(time.Duration(sleep) * time.Second)
+	}
 
 	execCmd := args[0]
 	execArgs := args[1:]
